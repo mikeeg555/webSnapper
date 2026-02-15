@@ -7,8 +7,10 @@ import argparse
 import random
 import signal
 import sys
+import textwrap
 import time
 from dataclasses import dataclass
+from typing import Optional, List
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,6 +30,13 @@ class Config:
     width: int
     height: int
     headless: bool
+    wait_until: str
+    wait_for_selector: Optional[str]
+    wait_for_selector_timeout_ms: int
+    accept_cookies: bool
+    accept_cookies_selector: Optional[str]
+    accept_cookies_timeout_ms: int
+    fixed_interval_minutes: Optional[float]
 
 
 def parse_args() -> Config:
@@ -62,6 +71,45 @@ def parse_args() -> Config:
         help="Page load timeout in milliseconds.",
     )
     parser.add_argument(
+        "--wait-until",
+        choices=["load", "domcontentloaded", "networkidle", "commit"],
+        default="networkidle",
+        help="Navigation wait strategy passed to Playwright's `wait_until`.",
+    )
+    parser.add_argument(
+        "--wait-for-selector",
+        default=None,
+        help="CSS selector to wait for after navigation (optional).",
+    )
+    parser.add_argument(
+        "--wait-for-selector-timeout",
+        type=int,
+        default=5000,
+        help="Timeout in milliseconds when waiting for selector.",
+    )
+    parser.add_argument(
+        "--accept-cookies",
+        action="store_true",
+        help="Try to accept cookie/privacy prompts by clicking known selectors.",
+    )
+    parser.add_argument(
+        "--accept-cookies-selector",
+        default=None,
+        help="Specific CSS selector to click for accepting cookies (overrides defaults).",
+    )
+    parser.add_argument(
+        "--accept-cookies-timeout",
+        type=int,
+        default=3000,
+        help="Timeout in milliseconds when attempting to click cookie accept button.",
+    )
+    parser.add_argument(
+        "--fixed-interval",
+        type=float,
+        default=None,
+        help="Use a fixed interval (in minutes) between snapshots instead of randomizing.",
+    )
+    parser.add_argument(
         "--settle-seconds",
         type=float,
         default=8.0,
@@ -92,6 +140,13 @@ def parse_args() -> Config:
         width=args.width,
         height=args.height,
         headless=not args.headed,
+        wait_until=args.wait_until,
+        wait_for_selector=args.wait_for_selector,
+        wait_for_selector_timeout_ms=args.wait_for_selector_timeout,
+        accept_cookies=args.accept_cookies,
+        accept_cookies_selector=args.accept_cookies_selector,
+        accept_cookies_timeout_ms=args.accept_cookies_timeout,
+        fixed_interval_minutes=args.fixed_interval,
     )
 
 
@@ -104,6 +159,13 @@ def utc_stamp() -> str:
 
 
 def choose_wait_seconds(config: Config) -> float:
+    """Return the wait interval in seconds.
+
+    If `config.fixed_interval_minutes` is set, use that exact interval (in minutes).
+    Otherwise return a randomized value between min and max minutes.
+    """
+    if config.fixed_interval_minutes is not None:
+        return float(config.fixed_interval_minutes) * 60.0
     return random.uniform(config.min_minutes * 60.0, config.max_minutes * 60.0)
 
 
@@ -136,7 +198,26 @@ def run(config: Config) -> None:
     )
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=config.headless)
+        try:
+            browser = playwright.chromium.launch(headless=config.headless)
+        except Exception as exc:  # Playwright raises implementation-specific Error class
+            message = str(exc)
+            if "Executable doesn't exist" in message or "playwright install" in message:
+                raise SystemExit(
+                    textwrap.dedent(
+                        """
+                        Playwright is installed, but Chromium binaries are missing.
+
+                        Run the following command, then start this script again:
+
+                            python -m playwright install chromium
+
+                        (Or use: playwright install)
+                        """
+                    ).strip()
+                ) from exc
+            raise
+
         context = browser.new_context(viewport={"width": config.width, "height": config.height})
         page = context.new_page()
 
@@ -152,13 +233,73 @@ def run(config: Config) -> None:
 
                 print(f"[{cycle}] Loading page...", flush=True)
                 try:
-                    page.goto(config.url, wait_until="networkidle", timeout=config.page_load_timeout_ms)
+                    page.goto(config.url, wait_until=config.wait_until, timeout=config.page_load_timeout_ms)
                 except PlaywrightTimeoutError:
                     print(
                         f"[{cycle}] Warning: page load timed out after "
                         f"{config.page_load_timeout_ms} ms; capturing anyway.",
                         flush=True,
                     )
+
+                if config.wait_for_selector:
+                    try:
+                        print(
+                            f"[{cycle}] Waiting for selector '{config.wait_for_selector}'...",
+                            flush=True,
+                        )
+                        page.wait_for_selector(
+                            config.wait_for_selector, timeout=config.wait_for_selector_timeout_ms
+                        )
+                    except PlaywrightTimeoutError:
+                        print(
+                            f"[{cycle}] Warning: selector '{config.wait_for_selector}' not found within "
+                            f"{config.wait_for_selector_timeout_ms} ms; capturing anyway.",
+                            flush=True,
+                        )
+
+                    if config.accept_cookies:
+                        # Common cookie/consent button selectors to try if user didn't provide one.
+                        default_selectors: List[str] = [
+                            # Common consent buttons; include Didomi (flightradar24) selector
+                            "button[aria-label='Accept']",
+                            "button[aria-label='accept']",
+                            "button:has-text('Accept')",
+                            "button:has-text('Accept all')",
+                            "button:has-text('I accept')",
+                            "button:has-text('Accept cookies')",
+                            "#onetrust-accept-btn-handler",
+                            "#didomi-notice-agree-button",
+                            ".cookie-consent button",
+                            ".cc-btn.cc-accept",
+                            "button[title='Accept']",
+                        ]
+
+                        selectors = (
+                            [config.accept_cookies_selector]
+                            if config.accept_cookies_selector
+                            else default_selectors
+                        )
+
+                        clicked = False
+                        for sel in selectors:
+                            if not sel:
+                                continue
+                            try:
+                                el = page.query_selector(sel)
+                                if el:
+                                    try:
+                                        el.click(timeout=config.accept_cookies_timeout_ms)
+                                        print(f"[{cycle}] Clicked cookie accept using selector '{sel}'", flush=True)
+                                        clicked = True
+                                        break
+                                    except Exception:
+                                        # ignore click errors and try next selector
+                                        pass
+                            except Exception:
+                                # selector evaluation failed, try next
+                                pass
+                        if not clicked:
+                            print(f"[{cycle}] No cookie accept button found (or click failed).", flush=True)
 
                 if config.settle_seconds > 0:
                     time.sleep(config.settle_seconds)
@@ -181,8 +322,14 @@ def run(config: Config) -> None:
         except StopLoop:
             print("Stopped.", flush=True)
         finally:
-            context.close()
-            browser.close()
+            try:
+                context.close()
+            except Exception as exc:  # Defensive: ignore errors during cleanup
+                print(f"Warning: error closing context: {exc}", flush=True)
+            try:
+                browser.close()
+            except Exception as exc:  # Defensive: ignore errors during cleanup
+                print(f"Warning: error closing browser: {exc}", flush=True)
 
 
 def main() -> int:
