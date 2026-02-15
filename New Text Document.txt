@@ -1,0 +1,2 @@
+write a python app that takes snapshots of flight radar every 5-10 minutes. and saves them to a subfolder. Later I want to crop these to just the map view and make a timelapse video
+https://www.flightradar24.com/52.81,-117.08/6
