@@ -40,6 +40,28 @@ Default output folder:
 python flight_snapshotter.py
 ```
 
+#### Fixed interval example
+
+Run with a fixed 6-minute interval (no randomization) and a 10s page load timeout:
+
+```powershell
+python flight_snapshotter.py --fixed-interval 6 --wait-until load --page-load-timeout 10000
+```
+
+#### Follow rotation
+
+When capturing long-running timelapses you can have the script pan the map longitude to follow the
+Earth's rotation. The script parses the first `lat,long` pair in the URL and advances longitude by
+0.25° per minute between snapshots (so a 6-minute interval shifts longitude by 1.5°).
+
+Example (fixed 6-minute interval, follow rotation):
+
+```powershell
+python flight_snapshotter.py --fixed-interval 6 --follow-rotation --wait-until load --page-load-timeout 10000
+```
+
+If the URL does not contain a coordinate pair the flag will be ignored with a warning.
+
 ### Useful options
 
 ```bash
@@ -57,6 +79,16 @@ Other flags:
 - `--headed`: run with a visible browser window instead of headless mode.
 - `--page-load-timeout <ms>`: timeout for page loading.
 - `--settle-seconds <seconds>`: extra wait after loading before capture.
+
+## Troubleshooting
+
+If you see an error like `Executable doesn't exist ... chrome-headless-shell` when starting the script, Playwright browser binaries are not installed yet. Run:
+
+```bash
+python -m playwright install chromium
+```
+
+Then re-run `python flight_snapshotter.py`.
 
 ## Stopping
 
